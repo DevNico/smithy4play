@@ -1,16 +1,19 @@
 package de.innfactory.smithy4play
 
 import cats.data.{EitherT, Kleisli}
-import de.innfactory.smithy4play.client.SmithyPlayClientEndpointErrorResponse
+import de.innfactory.smithy4play.client.{SmithyPlayClientEndpointErrorResponse, SmithyPlayClientEndpointResponse}
+import de.innfactory.smithy4play.middleware.MiddlewareBase
 import org.slf4j
 import play.api.Logger
 import play.api.libs.json.{JsValue, Json, OFormat}
 import play.api.mvc.{Headers, RequestHeader}
+import play.api.routing.Router.Routes
 import smithy4s.http.{CaseInsensitive, HttpEndpoint}
 
-import scala.annotation.{StaticAnnotation, compileTimeOnly}
+import scala.annotation.{MacroAnnotation, experimental}
 import scala.concurrent.Future
 import scala.language.experimental.macros
+import scala.quoted.{Expr, Quotes}
 
 trait ContextRouteError extends StatusResult[ContextRouteError] {
   def message: String
@@ -72,11 +75,51 @@ private[smithy4play] def matchRequestPath(
 ): Option[Map[String, String]] =
   ep.matches(x.path.replaceFirst("/", "").split("/").filter(_.nonEmpty))
 
-@compileTimeOnly(
-  "Macro failed to expand. \"Add: scalacOptions += \"-Ymacro-annotations\"\" to project settings"
-)
-class AutoRouting extends StaticAnnotation {
-  def macroTransform(annottees: Any*): Any = macro AutoRoutingMacro.impl
+@experimental
+class AutoRouting extends MacroAnnotation {
+  override def transform(using quotes: Quotes)(
+    tree: quotes.reflect.Definition
+  ): List[quotes.reflect.Definition] = {
+    import quotes.reflect.*
+
+    tree match {
+      case ClassDef(name, constr, parents, selfOpt, body) =>
+        val classSymbol = constr.symbol.owner
+        val thisRef: Term = This(classSymbol)
+
+        val cls = ClassDef.copy(tree)(
+          name = name,
+          constr = constr,
+          parents = parents ++ List(Applied(TypeTree.of[AutoRoutableController], Nil)),
+          selfOpt = selfOpt,
+          body = body
+            ++ List(
+            //            ValDef(
+            //              Symbol.newVal("router"),
+            //              Applied(Inferred(), List(Applied(TypeIdent(TypeRepr.of[Seq[?]]), List(TypeIdent(TypeRepr.of[MiddlewareBase]))), TypeIdent(TypeRepr.of[Routes]))),
+            //              Some(
+            //                Apply(
+            //                  Apply(
+            //                    TypeApply(
+            //                      Select(This(Some("TestController")), "transformToRouter"),
+            //                      List(Inferred(), Inferred())
+            //                    ),
+            //                    List(This(None))
+            //                  ),
+            //                  List(Ident("serviceInstance"), Ident("executionContext"), Ident("cc"))))))
+            //          )
+            ValDef(Symbol.newVal(classSymbol, "router", TypeRepr.of[Any], Flags.Override, Symbol.noSymbol), Some(thisRef))
+          )
+        )
+
+        report.info(cls.show(using Printer.TreeStructure))
+
+        List(cls)
+      case _ =>
+        report.error("Annotation @AutoRouting can only be used on classes")
+        List(tree)
+    }
+  }
 }
 
 private[smithy4play] trait Showable {
